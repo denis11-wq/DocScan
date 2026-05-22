@@ -218,8 +218,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
     <div class="titlebar-spacer"></div>
     <div class="titlebar-api">
       <span class="api-dot" id="apiDot"></span>
-      <label for="apiKey">Chave API Anthropic:</label>
-      <input type="password" id="apiKey" placeholder="sk-ant-api03-…" oninput="onApiKeyChange(this.value)" autocomplete="off">
+      <label for="ollamaUrl">Ollama URL:</label>
+      <input type="text" id="ollamaUrl" placeholder="http://localhost:11434" oninput="onOllamaUrlChange(this.value)" autocomplete="off">
     </div>
   </div>
 
@@ -356,23 +356,23 @@ let currentFileType = null;  // 'image' | 'pdf'
 let currentFileName = '';
 let currentPdfPages = 0;
 let editId = null;
-let apiKey = '';
+let ollamaUrl = 'http://localhost:11434';
 
 try { records = JSON.parse(localStorage.getItem('docscan_win') || '[]'); } catch(e) {}
-try { apiKey = localStorage.getItem('docscan_apikey') || ''; } catch(e) {}
-if (apiKey) { document.getElementById('apiKey').value = apiKey; updateApiDot(true); }
+try { ollamaUrl = localStorage.getItem('docscan_ollama_url') || 'http://localhost:11434'; } catch(e) {}
+document.getElementById('ollamaUrl').value = ollamaUrl;
 
 function saveRecords() { localStorage.setItem('docscan_win', JSON.stringify(records)); updateBadge(); }
 
-// ── API key ────────────────────────────────────────────────────────────────
-function onApiKeyChange(val) {
-  apiKey = val.trim();
-  localStorage.setItem('docscan_apikey', apiKey);
-  updateApiDot(apiKey.startsWith('sk-ant'));
+// ── Ollama URL ─────────────────────────────────────────────────────────────
+function onOllamaUrlChange(val) {
+  ollamaUrl = val.trim() || 'http://localhost:11434';
+  localStorage.setItem('docscan_ollama_url', ollamaUrl);
+  document.getElementById('apiDot').className = 'api-dot';
 }
 function updateApiDot(ok) {
   const dot = document.getElementById('apiDot');
-  dot.className = 'api-dot ' + (ok ? 'ok' : apiKey ? 'err' : '');
+  dot.className = 'api-dot ' + (ok ? 'ok' : 'err');
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────
@@ -515,47 +515,41 @@ function resetFile() {
 
 // ── AI Extraction ──────────────────────────────────────────────────────────
 async function doExtract(b64) {
-  showStatus('scanning', '<span class="spin">⚙️</span> A extrair dados com IA…');
+  showStatus('scanning', '<span class="spin">⚙️</span> A extrair dados com IA (Ollama)…');
 
-  if (!apiKey) {
-    showStatus('warn', '⚠️ Insira a sua chave API Anthropic no campo no topo da janela (sk-ant-…). Pode preencher os dados manualmente.');
-    return;
-  }
-
-  const prompt = `Analyze this document image carefully and extract ONLY these 4 fields. Return ONLY a raw JSON object with no markdown, no explanation:
+  const prompt = `Analyze this document image carefully and extract ONLY these 4 fields. Return ONLY a raw JSON object with no markdown, no explanation, no thinking tags:
 {"company":"exact company or organization name as written","address":"full postal address including street, number, city, postal code","email":"email address","phone":"phone or mobile number"}
 Rules: use "" for missing fields. Do not invent data. Extract exactly what is printed.`;
 
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch(`${ollamaUrl}/api/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 400,
-        messages: [{ role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
-          { type: 'text', text: prompt }
-        ]}]
+        model: 'qwen3.5vl8b',
+        stream: false,
+        messages: [{
+          role: 'user',
+          content: prompt,
+          images: [b64]
+        }]
       })
     });
 
     if (!res.ok) {
       const err = await res.json().catch(()=>({}));
-      const msg = err?.error?.message || `Erro HTTP ${res.status}`;
-      if (res.status === 401) { updateApiDot(false); showStatus('error', '✗ Chave API inválida. Verifique a chave no campo no topo.'); return; }
-      showStatus('error', `✗ ${msg}`);
+      const msg = err?.error || `Erro HTTP ${res.status}`;
+      updateApiDot(false);
+      showStatus('error', `✗ Ollama: ${msg}`);
       return;
     }
 
     updateApiDot(true);
     const data = await res.json();
-    const raw = (data.content||[]).map(b=>b.text||'').join('').replace(/```json|```/g,'').trim();
+    const raw = (data.message?.content || '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/```json|```/g, '')
+      .trim();
     const obj = JSON.parse(raw);
     ['f_company','f_address','f_email','f_phone'].forEach(id => document.getElementById(id).removeAttribute('readonly'));
     document.getElementById('f_company').value = obj.company || '';
@@ -565,7 +559,8 @@ Rules: use "" for missing fields. Do not invent data. Extract exactly what is pr
     const n = [obj.company,obj.address,obj.email,obj.phone].filter(Boolean).length;
     showStatus('ok', `✓ ${n} campo(s) extraído(s) com sucesso! Confirme os dados e clique Guardar Registo.`);
   } catch(err) {
-    showStatus('warn', '⚠️ Não foi possível extrair automaticamente. Verifique a sua ligação à internet ou preencha manualmente.');
+    updateApiDot(false);
+    showStatus('warn', '⚠️ Não foi possível ligar ao Ollama. Verifique se o serviço está a correr em ' + ollamaUrl + ' ou preencha manualmente.');
   }
 }
 
